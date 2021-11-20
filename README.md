@@ -1,6 +1,9 @@
 # Baseline code
 - `main.py`: logistic regression
-- `main_lightgbm.py`: LightGBM
+- `main_dt.py`: Decision Tree
+
+# NSML
+- 현재 KFold 형식의 모델 저장이 제대로 이루어 지지 않음 (NSML 모델 저장 방식 때문)
 
 ## 실행 방법
 ```bash
