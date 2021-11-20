@@ -9,6 +9,7 @@ setup(
         'pandas',
         'joblib',
         'sklearn',
-        'lightgbm'
+        'lightgbm',
+        'xgboost'
     ]
 )
