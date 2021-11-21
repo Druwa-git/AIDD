@@ -11,9 +11,23 @@ import torch.optim as optim
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from torch.autograd import Variable
+from torch.optim.lr_scheduler import MultiStepLR
+
+from imblearn.over_sampling import SMOTE
+from sklearn.preprocessing import StandardScaler
 
 import nsml
 from nsml import DATASET_PATH
+
+
+class OverSampler:
+    def __init__(self):
+        pass
+
+    def oversample(self, data, label):
+        oversampled_data, oversampled_label = SMOTE(random_state=42).fit_resample(data, label)
+        return oversampled_data, oversampled_label
+
 
 
 def bind_model(model, optimizer=None):
@@ -60,9 +74,6 @@ def preproc_data(data, label=None, train=True, val_ratio=0.2, seed=1234):
     if train:
         dataset = dict()
 
-        # NaN 값 0으로 채우기
-        data = data.fillna(0)
-
         # 성별 ['M', 'F'] -> [0, 1]로 변환
         data['gender_enc'] = np.where(data['gender'] == 'M', 0, 1)
 
@@ -71,7 +82,17 @@ def preproc_data(data, label=None, train=True, val_ratio=0.2, seed=1234):
 
         DROP_COLS = ['CDMID', 'gender', 'date', 'date_E']
         X = data.drop(columns=DROP_COLS).copy()
+        X = X.fillna(X.median())
         y = label
+
+        # Oversampling
+        oversampler = OverSampler()
+        X, y = oversampler.oversample(X, y)
+
+        # Standard Scaler
+        # scaler = StandardScaler()
+        # X_cols = X.columns
+
 
         X_train, X_val, y_train, y_val = train_test_split(X, y,
                                                           stratify=y,
@@ -84,15 +105,16 @@ def preproc_data(data, label=None, train=True, val_ratio=0.2, seed=1234):
         X_val = torch.as_tensor(X_val.values).float()
         y_val = torch.as_tensor(y_val.reshape(-1, 1)).float()
 
+        X = torch.as_tensor(X.values).float()
+        y = torch.as_tensor(y.reshape(-1, 1)).float()
+
         dataset['train'] = TensorDataset(X_train, y_train)
         dataset['val'] = TensorDataset(X_val, y_val)
+        dataset['all'] = TensorDataset(X, y)
 
         return dataset
 
     else:
-        # NaN 값 0으로 채우기
-        data = data.fillna(0)
-
         # 성별 ['M', 'F'] -> [0, 1]로 변환
         data['gender_enc'] = np.where(data['gender'] == 'M', 0, 1)
 
@@ -101,6 +123,7 @@ def preproc_data(data, label=None, train=True, val_ratio=0.2, seed=1234):
 
         DROP_COLS = ['CDMID', 'gender', 'date', 'date_E']
         data = data.drop(columns=DROP_COLS).copy()
+        data = data.fillna(data.median())
 
         X_test = torch.as_tensor(data.values).float()
 
@@ -113,17 +136,31 @@ class LogisticRegression(nn.Module):
         super(LogisticRegression, self).__init__()
         # 이런 식으로 변형해 주세요
         self.layer1 = nn.Sequential(
-            nn.Linear(input_size, 128),
-            nn.BatchNorm1d(128),
-            nn.Sigmoid(),
-            nn.Dropout(p=0.2)
+            nn.Linear(input_size, 64),
+            nn.BatchNorm1d(64),
+            nn.GELU(),
+            nn.Dropout(p=0.4)
+        )
+        self.layer2 = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.GELU(),
+            nn.Dropout(p=0.4)
+        )
+        self.layer3 = nn.Sequential(
+            nn.Linear(32, 16),
+            nn.BatchNorm1d(16),
+            nn.GELU(),
+            nn.Dropout(p=0.4)
         )
 
-        self.linear = nn.Linear(128, output_size)
+        self.linear = nn.Linear(16, output_size)
         # self.linear = nn.Linear(input_size, output_size)
 
     def forward(self, x):
         x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
         return self.linear(x)
 
 
@@ -141,7 +178,7 @@ if __name__ == '__main__':
     args.add_argument('--val_ratio', type=int, default=0.2)
     args.add_argument('--lr', type=float, default=0.1)
     args.add_argument('--input_size', type=int, default=22)
-    args.add_argument('--epochs', type=int, default=30)
+    args.add_argument('--epochs', type=int, default=512)
     config = args.parse_args()
 
     time_init = time.time()
@@ -152,6 +189,7 @@ if __name__ == '__main__':
     model = LogisticRegression(config.input_size, 1)
     loss_fn = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
+    lr_scheduler = MultiStepLR(optimizer, milestones=[32, 64, 128, 256], gamma=0.25)
 
     # nsml.bind() should be called before nsml.paused()
     bind_model(model, optimizer=optimizer)
@@ -172,6 +210,7 @@ if __name__ == '__main__':
         dataset = preproc_data(raw_data, raw_labels, train=True, val_ratio=0.2, seed=1234)
 
         train_dl = DataLoader(dataset['train'], config.batch_size, shuffle=True)
+        # train_dl = DataLoader(dataset['all'], config.batch_size, shuffle=True)
         val_dl = DataLoader(dataset['val'], config.batch_size, shuffle=False)
         time_dl_init = time.time()
         print('Time to dataloader initialization: ', time_dl_init - time_init)

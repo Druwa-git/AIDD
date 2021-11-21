@@ -10,6 +10,7 @@ setup(
         'joblib',
         'sklearn',
         'lightgbm',
-        'xgboost'
+        'xgboost',
+        'imblearn',
     ]
 )
