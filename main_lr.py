@@ -13,15 +13,14 @@ from torch.utils.data import DataLoader, TensorDataset
 from torch.autograd import Variable
 from torch.optim.lr_scheduler import MultiStepLR
 
-from imblearn.over_sampling import SMOTE
-from sklearn.preprocessing import StandardScaler
+from imblearn.over_sampling import SMOTE, RandomOverSampler
+from sklearn.preprocessing import StandardScaler, Normalizer
 
 import nsml
 from nsml import DATASET_PATH
 
 import math
 from torch.optim.lr_scheduler import _LRScheduler
-
 from sklearn.metrics import roc_auc_score
 
 
@@ -29,10 +28,12 @@ class OverSampler:
     def __init__(self):
         pass
 
-    def oversample(self, data, label):
-        oversampled_data, oversampled_label = SMOTE(random_state=42).fit_resample(data, label)
+    def oversample(self, data, label, kind):
+        if kind == "SMOTE":
+            oversampled_data, oversampled_label = SMOTE(random_state=42).fit_resample(data, label)
+        elif kind == "ROSE":
+            oversampled_data, oversampled_label = RandomOverSampler(random_state=42).fit_resample(data, label)
         return oversampled_data, oversampled_label
-
 
 
 def bind_model(model, optimizer=None):
@@ -63,7 +64,7 @@ def inference(path, model, **kwargs):
     model.eval()
 
     data = Variable(preproc_data(pd.read_csv(path), train=False))
-    output_pred_labels = torch.round(torch.sigmoid(model(data)))
+    output_pred_labels = torch.round(torch.sigmoid(model(data)+1))
     output_pred_labels = output_pred_labels.detach().numpy()
     output_pred_labels = output_pred_labels.astype('int').reshape(-1).tolist()
 
@@ -76,6 +77,7 @@ def inference(path, model, **kwargs):
 
 # 데이터 전처리
 def preproc_data(data, label=None, train=True, val_ratio=0.2, seed=1234):
+    DROP_COLS = ['CDMID', 'gender', 'date', 'date_E', 'Wt', 'HbA1c', 'FBG']
     if train:
         dataset = dict()
 
@@ -85,22 +87,22 @@ def preproc_data(data, label=None, train=True, val_ratio=0.2, seed=1234):
         # 날짜 datetime으로 변환
         # df.loc[:, 'date'] = pd.to_datetime(df['date'], format='%Y%m%d')
 
-        DROP_COLS = ['CDMID', 'gender', 'date', 'date_E']
         X = data.drop(columns=DROP_COLS).copy()
         X = X.fillna(X.median())
         y = label
 
         # Oversampling
         oversampler = OverSampler()
-        X, y = oversampler.oversample(X, y)
+        X, y = oversampler.oversample(X, y, "SMOTE")
 
         sLength = len(X['gender_enc'])
         X = X.assign(bias=pd.Series(np.ones(sLength)).values)
         print(sLength)
 
-        # Standard Scaler
-        # scaler = StandardScaler()
-        # X_cols = X.columns
+        # Normalizer
+        # scaler = Normalizer().fit(X)
+        # X = scaler.transform(X)
+        # X = pd.DataFrame(X)
 
 
         X_train, X_val, y_train, y_val = train_test_split(X, y,
@@ -130,12 +132,16 @@ def preproc_data(data, label=None, train=True, val_ratio=0.2, seed=1234):
         # 날짜 datetime으로 변환
         # df.loc[:, 'date'] = pd.to_datetime(df['date'], format='%Y%m%d')
 
-        DROP_COLS = ['CDMID', 'gender', 'date', 'date_E']
         data = data.drop(columns=DROP_COLS).copy()
         data = data.fillna(data.median())
 
         sLength = len(data['gender_enc'])
         data = data.assign(bias=pd.Series(np.ones(sLength)).values)
+
+        # Normalizer
+        # scaler = Normalizer().fit(data)
+        # data = scaler.transform(data)
+        # data = pd.DataFrame(data)
 
         X_test = torch.as_tensor(data.values).float()
 
@@ -151,31 +157,37 @@ class CustomClassifier(nn.Module):
         self.layer1 = nn.Sequential(
             nn.Linear(input_size, 16),
             nn.BatchNorm1d(16),
-            nn.Sigmoid(),
+            nn.ELU(),
             nn.Dropout(p=0.5)
         )
         self.layer2 = nn.Sequential(
             nn.Linear(16, 20),
             nn.BatchNorm1d(20),
-            nn.Sigmoid(),
+            nn.ELU(),
             nn.Dropout(p=0.5)
         )
         self.layer3 = nn.Sequential(
             nn.Linear(20, 24),
             nn.BatchNorm1d(24),
-            nn.Sigmoid(),
+            nn.ELU(),
+            nn.Dropout(p=0.5)
+        )
+        self.layer4 = nn.Sequential(
+            nn.Linear(24, 24),
+            nn.BatchNorm1d(20),
+            nn.ELU(),
             nn.Dropout(p=0.5)
         )
         self.layer4 = nn.Sequential(
             nn.Linear(24, 20),
             nn.BatchNorm1d(20),
-            nn.Sigmoid(),
+            nn.ELU(),
             nn.Dropout(p=0.5)
         )
         self.layer5 = nn.Sequential(
             nn.Linear(20, 16),
             nn.BatchNorm1d(16),
-            nn.Sigmoid(),
+            nn.ELU(),
             nn.Dropout(p=0.5)
         )
 
@@ -263,7 +275,7 @@ if __name__ == '__main__':
     # args.add_argument('--val_ratio', type=int, default=0.2)
     args.add_argument('--val_ratio', type=int, default=0.3)
     args.add_argument('--lr', type=float, default=0.1)
-    args.add_argument('--input_size', type=int, default=22)
+    args.add_argument('--input_size', type=int, default=19)
     args.add_argument('--epochs', type=int, default=1000)
     config = args.parse_args()
 
@@ -275,15 +287,17 @@ if __name__ == '__main__':
     model = CustomClassifier(config.input_size+1, 1)
 
     loss_fn = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam(model.parameters(), lr=config.lr)
-    scheduler = MultiStepLR(optimizer, milestones=[100, 200, 300, 400, 500, 600, 700, 800], gamma=0.5)
+    optimizer = optim.AdamW(model.parameters(), lr=config.lr, amsgrad=True)
+    milestones_list = [d * 100 for d in range(1, 10)]
+    scheduler = MultiStepLR(optimizer, milestones=milestones_list, gamma=0.5)
 
     # for cosine scheduler
     # optimizer = optim.Adam(model.parameters(), lr=0)
-    # scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=150, T_mult=1, eta_max=0.1,  T_up=10, gamma=0.5)
+    # scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=100, T_mult=1, eta_max=0.2,  T_up=10, gamma=0.5)
 
     # nsml.bind() should be called before nsml.paused()
     bind_model(model, optimizer=optimizer)
+    # nsml.load(checkpoint='991', session="AID035/nia_dm/37")
 
     # DONOTCHANGE: They are reserved for nsml
     # Warning: Do not load data before the following code!
@@ -310,7 +324,8 @@ if __name__ == '__main__':
 
         min_val_loss = np.inf
         loss_list = []
-        score_list = []
+        score_roc_list = []
+        score_acc_list = []
         for epoch in range(config.epochs):
             # train model
             running_loss = 0.
@@ -357,6 +372,7 @@ if __name__ == '__main__':
             num_runs = 0
 
             correct, total = 0, 0
+            correct_roc, total_roc = 0, 0
             for data, labels in val_dl:
                 data = Variable(data)
                 labels = Variable(labels)
@@ -367,18 +383,28 @@ if __name__ == '__main__':
                 running_loss += loss.item()
                 num_runs += 1
 
-                output_pred_labels = torch.round(torch.sigmoid(output_pred))
+                output_pred_labels = torch.round(torch.sigmoid(output_pred + 1))
 
-                # total += labels.size(0)
-                # correct += (output_pred_labels == labels).sum().item()
+                total += labels.size(0)
+                correct += (output_pred_labels == labels).sum().item()
+
+                # roc_auc_score
+                total_roc += 1
+                correct_roc += roc_auc_score(labels.detach().numpy(), output_pred.detach().numpy())
 
             val_loss = running_loss / num_runs
             loss_list.append(val_loss)
 
-            score = 100.0 * float(correct) / float(total)
-            score_list.append(score)
+            score_acc = 100.0 * float(correct) / float(total)
+            score_acc_list.append(score_acc)
+
+            # roc_auc_score
+            score = (correct_roc / total_roc) * 100
+            score_roc_list.append(score)
+
+            print(f'Accuracy: {score_acc} %% ROC : {score} %%')
             print(f"[Validation] Loss: {running_loss / num_runs}")
-            print('Accuracy: %f %%' % (score))
+
 
             nsml.report(
                 summary=True,
@@ -391,13 +417,10 @@ if __name__ == '__main__':
 
             if (running_loss < min_val_loss) or (epoch % 10 == 0):
                 nsml.save(epoch)
-            elif score > np.array(score_list).max():
-                nsml.save(epoch)
-            elif val_loss < np.array(val_loss).min():
-                nsml.save(epoch)
 
         print(f"Best Val Loss Epoch : {np.array(loss_list).argmin()} / Loss : {np.array(loss_list).min()}")
-        print(f"Best Score Epoch : {np.array(score_list).argmax()} / Score : {np.array(score_list).max()}")
+        print(f"Best ROC Score Epoch : {np.array(score_roc_list).argmax()} / Score : {np.array(score_roc_list).max()}")
+        print(f"Best ACC Score Epoch : {np.array(score_acc_list).argmax()} / Score : {np.array(score_acc_list).max()}")
         final_time = time.time()
         print("Time to dataloader initialization: ", time_dl_init - time_init)
         print("Time spent on training :", final_time - time_dl_init)

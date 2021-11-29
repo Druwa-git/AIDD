@@ -1,3 +1,6 @@
 main_lightgbm.py
 seq.py
 auto_nsml.sh
+testcode/
+.idea/
+main_refactor.py
